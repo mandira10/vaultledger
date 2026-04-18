@@ -31,18 +31,18 @@ VaultLedger provides organizations with a centralized platform to manage complia
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    API Layer                         │
-│         Controllers · Middleware · Filters           │
+│                    API Layer                        │
+│         Controllers · Middleware · Filters          │
 ├─────────────────────────────────────────────────────┤
 │                Application Layer                    │
 │      Commands · Queries · Validators · DTOs         │
-│              (MediatR + FluentValidation)            │
+│              (MediatR + FluentValidation)           │
 ├─────────────────────────────────────────────────────┤
 │              Infrastructure Layer                   │
-│    EF Core · DbContext · JWT · Serilog · Services    │
+│    EF Core · DbContext · JWT · Serilog · Services   │
 ├─────────────────────────────────────────────────────┤
 │                 Domain Layer                        │
-│       Entities · Enums · Interfaces · ValueObjects   │
+│       Entities · Enums · Interfaces · ValueObjects  │
 └─────────────────────────────────────────────────────┘
 ```
 
