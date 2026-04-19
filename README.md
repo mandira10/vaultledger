@@ -68,6 +68,7 @@ Request
 | Web framework | ASP.NET Core Web API |
 | ORM | Entity Framework Core + Npgsql |
 | Database | PostgreSQL 16 |
+| Migrations | DbUp (hand-written SQL scripts) |
 | Architecture | Clean Architecture (4 layers) |
 | CQRS | MediatR |
 | Validation | FluentValidation |
@@ -363,63 +364,174 @@ All endpoints require JWT authentication unless noted. Tenant context is extract
 
 ## Database Migrations
 
-VaultLedger uses EF Core migrations to manage schema changes.
+VaultLedger uses a **hybrid migration strategy**: EF Core manages the runtime `DbContext` (query filters, composite foreign keys, entity configuration) while schema evolution is driven by **hand-written, versioned SQL scripts** executed via [DbUp](https://dbup.readthedocs.io/).
 
-### Migration Commands
+### Why Hybrid?
+
+| Concern | Why it matters in compliance/audit domains |
+|---------|-------------------------------------------|
+| **Auditability** | Every schema change is a reviewable SQL file in version control. Compliance auditors can read it without knowing .NET. |
+| **Explicit control** | We write exactly what runs. No ORM "magic" generating unexpected `DROP` statements. |
+| **PostgreSQL features** | Partial indexes, triggers, `GIN` indexes on `jsonb` and `CHECK` constraints are first-class — not fighting the ORM. |
+| **Zero-downtime patterns** | Expand/contract migrations (see below) require carefully ordered SQL that ORM migrations can't express cleanly. |
+| **Rollback strategy** | Every forward migration has a matching `down` script — we can roll back precisely. |
+
+EF Core is still excellent for modelling relationships, query filters and type-safe queries. We keep it for what it's good at and own the schema layer ourselves.
+
+### Directory Layout
+
+```
+src/VaultLedger.Infrastructure/Migrations/
+├── Scripts/
+│   ├── up/
+│   │   ├── 001_initial_schema.sql
+│   │   ├── 002_indexes.sql
+│   │   ├── 003_audit_entries_immutability_trigger.sql
+│   │   └── ...
+│   └── down/
+│       ├── 001_initial_schema.down.sql
+│       ├── 002_indexes.down.sql
+│       └── ...
+└── MigrationRunner.cs          # DbUp configuration + execution
+```
+
+DbUp tracks applied scripts in a `schema_migrations` table inside the target database. Each script runs in a transaction. Scripts are embedded as resources so the runner can execute them from a published container.
+
+### Naming Convention
+
+```
+<NNN>_<snake_case_description>.sql          # forward migration
+<NNN>_<snake_case_description>.down.sql     # rollback
+```
+
+- **Sequential numbering** (`001`, `002`, …) — keeps history linear and merge conflicts obvious
+- **Snake-case description** — matches PostgreSQL naming style
+- **Always paired** — no forward script ships without a matching down script
+
+Examples:
+```
+001_initial_schema.sql
+002_indexes.sql
+003_audit_entries_immutability_trigger.sql
+004_add_cases_tags_column.sql
+005_backfill_cases_last_entry_at.sql
+```
+
+### Commands
 
 ```bash
-# Create a new migration
-dotnet ef migrations add <MigrationName> \
-  --project src/VaultLedger.Infrastructure \
-  --startup-project src/VaultLedger.API
+# Apply all pending migrations
+dotnet run --project src/VaultLedger.Infrastructure -- migrate up
 
-# Apply pending migrations
-dotnet ef database update \
-  --project src/VaultLedger.Infrastructure \
-  --startup-project src/VaultLedger.API
+# Roll back the most recent migration (runs matching .down.sql)
+dotnet run --project src/VaultLedger.Infrastructure -- migrate down
 
-# Generate SQL script (for review before applying to production)
-dotnet ef migrations script \
-  --project src/VaultLedger.Infrastructure \
-  --startup-project src/VaultLedger.API \
-  --output migrations.sql
+# Generate a SQL preview of what would run (no execution)
+dotnet run --project src/VaultLedger.Infrastructure -- migrate preview
 
-# Revert to a specific migration
-dotnet ef database update <PreviousMigrationName> \
-  --project src/VaultLedger.Infrastructure \
-  --startup-project src/VaultLedger.API
-
-# Remove the last migration (if not yet applied)
-dotnet ef migrations remove \
-  --project src/VaultLedger.Infrastructure \
-  --startup-project src/VaultLedger.API
+# Check migration status
+dotnet run --project src/VaultLedger.Infrastructure -- migrate status
 ```
 
-### Migration Naming Convention
+In CI/CD, the same commands run against staging/prod with explicit approval gates.
 
-Use descriptive, timestamped names:
+### Environment Strategy
+
+| Environment | How migrations run | Review gate |
+|-------------|-------------------|-------------|
+| **Local dev** | Auto-applied on API startup (`migrate up`) | None |
+| **CI integration tests** | Auto-applied against Testcontainers PostgreSQL | None |
+| **Staging** | Run via deployment pipeline before app deploy | PR review |
+| **Production** | Manual `migrate up` as a separate pipeline step | PR review + DBA approval |
+
+The API container **does not** run migrations on startup in staging/prod — a separate job does. This prevents race conditions when scaling horizontally and makes migrations a deliberate, observable event.
+
+### Migration Types
+
+**Schema migrations** — pure DDL (`CREATE TABLE`, `ALTER COLUMN`, `CREATE INDEX`). These are fast and reversible.
+
+**Data migrations** — `UPDATE` / `INSERT` for backfills or data reshaping. These are slower and harder to roll back. Rules:
+- Always batch (`UPDATE ... WHERE id IN (SELECT id FROM ... LIMIT 10000)`)
+- Use a separate migration file from the schema change
+- Never in the same script as the schema change that depends on the data
+
+**Index migrations** — on large tables, always use `CREATE INDEX CONCURRENTLY` in PostgreSQL to avoid locking writes. DbUp supports this because each script runs in its own transaction control.
+
+### Zero-Downtime Migrations (Expand / Contract)
+
+For breaking schema changes on a running system, we follow the **expand / contract** pattern across multiple deployments:
+
+**Example: renaming `entities.name` → `entities.display_name`**
 
 ```
-InitialCreate              — first migration with all 9 tables
-AddCasesPriorityIndex      — adds a specific index
-AlterEntityAddPhoneColumn  — schema change to existing table
+Deploy 1 — EXPAND
+  ├── Migration:  ADD COLUMN display_name; backfill from name; add sync trigger
+  └── App code:   writes to BOTH columns, reads from name
+
+Deploy 2 — MIGRATE READS
+  └── App code:   writes to both, reads from display_name
+
+Deploy 3 — CONTRACT
+  ├── App code:   writes to display_name only
+  └── Migration:  DROP trigger; DROP COLUMN name
 ```
 
-### Migration Strategy
+Each deploy is independently rollback-safe. Never combine expand and contract in one deployment.
 
-1. **Development:** migrations auto-apply on startup via `context.Database.Migrate()`
-2. **Production:** generate SQL scripts, review, then apply manually or via CI pipeline
-3. **Rollback:** always test rollback by reverting to the previous migration before deploying
-4. **Review:** every migration should be reviewed as a SQL script (`migrations script`) before merging
+### Reviewing a Migration
 
-### What the Initial Migration Creates
+Every migration PR must include:
 
-The `InitialCreate` migration sets up:
-- All 9 tables with proper column types and constraints
+1. **The forward script** (`NNN_description.sql`)
+2. **The rollback script** (`NNN_description.down.sql`)
+3. **A brief PR description** covering:
+   - What the change does
+   - Whether it requires a data backfill
+   - Whether it's locking (blocks writes) or non-locking
+   - Expected runtime on the largest table
+   - Any expand/contract coordination required
+4. **Test evidence** that both forward and rollback were tested locally
+
+### Testing Migrations
+
+```bash
+# Integration test harness spins up a fresh PostgreSQL container,
+# applies all migrations, then runs test suite
+dotnet test tests/VaultLedger.IntegrationTests
+```
+
+Specific migration tests live in `tests/VaultLedger.IntegrationTests/Migrations/`:
+- **Forward application** — each migration applies cleanly on an empty database
+- **Idempotency** — running `migrate up` twice is a no-op
+- **Rollback** — each forward migration can be rolled back and reapplied
+- **Schema drift** — the final schema matches what EF Core expects (compared via `dotnet ef dbcontext script`)
+
+### What the Initial Schema (`001_initial_schema.sql`) Creates
+
+- All 9 tables with explicit column types and constraints
 - Composite foreign keys on `cases`, `audit_entries` and `compliance_reviews`
-- Unique constraints scoped to tenant (`tenant_id + field`)
-- All indexes listed in the [Indexes](#indexes) section
-- Enum fields stored as strings with CHECK constraints
+- Unique constraints scoped to tenant (`UNIQUE(tenant_id, field)`)
+- Enum fields as `TEXT` with `CHECK` constraints (not PostgreSQL enums — enums are hard to migrate)
+- `created_at` columns with `TIMESTAMPTZ NOT NULL DEFAULT NOW() AT TIME ZONE 'UTC'`
+
+### What `003_audit_entries_immutability_trigger.sql` Does
+
+Enforces append-only behaviour at the database level — even a direct SQL `UPDATE` or `DELETE` on `audit_entries` is blocked:
+
+```sql
+CREATE OR REPLACE FUNCTION prevent_audit_entry_modification()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'audit_entries is append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER audit_entries_no_update
+  BEFORE UPDATE OR DELETE ON audit_entries
+  FOR EACH ROW EXECUTE FUNCTION prevent_audit_entry_modification();
+```
+
+Immutability is enforced at four layers: domain (private setters), application (no update command exists), API (no PUT/DELETE route) and database (this trigger).
 
 ## Environment Variables
 
