@@ -6,4 +6,7 @@
     <Project Path="src/VaultLedger.Domain/VaultLedger.Domain.csproj" />
     <Project Path="src/VaultLedger.Infrastructure/VaultLedger.Infrastructure.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VaultLedger.UnitTests/VaultLedger.UnitTests.csproj" />
+  </Folder>
 </Solution>
