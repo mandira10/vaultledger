@@ -1,6 +1,6 @@
 # VaultLedger
 
-Multi-tenant compliance and audit trail platform built with Next.js, Tailwind, C# / .NET 8, Clean Architecture, EF Core and PostgreSQL with pgvector. Features role-based access control, immutable audit logging, document management workflows, tenant isolation and AI-assisted drafting, summarization, semantic search and natural-language Q&A powered by Claude and OpenAI.
+Multi-tenant compliance and audit trail platform built with Next.js, Tailwind, C# / .NET 10, Clean Architecture, EF Core and PostgreSQL with pgvector. Features role-based access control, immutable audit logging, document management workflows, tenant isolation and AI-assisted drafting, summarization, semantic search and natural-language Q&A powered by Claude and OpenAI.
 
 ## Table of Contents
 
@@ -71,7 +71,7 @@ Request
 
 | Layer | Technology |
 |-------|-----------|
-| Runtime | .NET 8 (LTS) |
+| Runtime | .NET 10 (LTS) |
 | Web framework | ASP.NET Core Web API |
 | ORM | Entity Framework Core + Npgsql |
 | Database | PostgreSQL 16 + `pgvector` extension |
@@ -688,7 +688,7 @@ Immutability is enforced at four layers: domain (private setters), application (
 
 ### Prerequisites
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - [Docker](https://www.docker.com/products/docker-desktop) + Docker Compose
 - [Node.js 20+](https://nodejs.org/) (for frontend)
 - [Anthropic API key](https://console.anthropic.com/) (required for AI features)
