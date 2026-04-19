@@ -1,0 +1,41 @@
+# Build artefacts
+**/bin/
+**/obj/
+**/out/
+**/publish/
+
+# VCS and editors
+.git/
+.github/
+.vs/
+.vscode/
+.idea/
+
+# Node / frontend (built separately when it exists)
+**/node_modules/
+**/.next/
+
+# Logs and local data
+**/*.log
+**/logs/
+
+# Secrets and local config
+**/.env
+**/.env.*
+**/appsettings.Development.json
+**/appsettings.*.local.json
+**/*.pfx
+**/*.key
+
+# Tests (not needed in runtime image)
+tests/
+
+# Docs and dev-only files
+*.md
+CLAUDE.md
+docker-compose.yml
+docker-compose.override.yml
+Dockerfile
+.dockerignore
+.gitignore
+.editorconfig
