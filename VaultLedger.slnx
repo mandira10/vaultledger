@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/VaultLedger.AI/VaultLedger.AI.csproj" />
     <Project Path="src/VaultLedger.Application/VaultLedger.Application.csproj" />
     <Project Path="src/VaultLedger.Domain/VaultLedger.Domain.csproj" />
     <Project Path="src/VaultLedger.Infrastructure/VaultLedger.Infrastructure.csproj" />
