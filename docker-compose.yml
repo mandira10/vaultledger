@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: vaultledger-postgres
+    environment:
+      POSTGRES_DB: vaultledger
+      POSTGRES_USER: vaultledger
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vaultledger_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaultledger -d vaultledger"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - vaultledger
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vaultledger-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=vaultledger;Username=vaultledger;Password=${POSTGRES_PASSWORD:-vaultledger_dev}"
+      Jwt__Secret: ${JWT_SECRET:-dev-secret-change-me-min-32-characters-long}
+      Jwt__Issuer: VaultLedger
+      Jwt__Audience: VaultLedger
+      Jwt__ExpiryMinutes: "60"
+      Anthropic__ApiKey: ${ANTHROPIC_API_KEY:-}
+      Anthropic__Model: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      OpenAI__ApiKey: ${OPENAI_API_KEY:-}
+      OpenAI__EmbeddingModel: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      AI__MonthlyTokenBudgetDefault: "5000000"
+    networks:
+      - vaultledger
+
+networks:
+  vaultledger:
+    driver: bridge
+
+volumes:
+  postgres_data:
