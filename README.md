@@ -1,6 +1,6 @@
 # VaultLedger
 
-Multi-tenant compliance and audit trail platform built with Next.js, Tailwind, C# / .NET 8, Clean Architecture, EF Core and PostgreSQL. Features role-based access control, immutable audit logging, document management workflows and tenant isolation.
+Multi-tenant compliance and audit trail platform built with Next.js, Tailwind, C# / .NET 8, Clean Architecture, EF Core and PostgreSQL with pgvector. Features role-based access control, immutable audit logging, document management workflows, tenant isolation and AI-assisted drafting, summarization, semantic search and natural-language Q&A powered by Claude and OpenAI.
 
 ## Table of Contents
 
@@ -11,6 +11,7 @@ Multi-tenant compliance and audit trail platform built with Next.js, Tailwind, C
 - [Tenant Isolation](#tenant-isolation)
 - [API Endpoints](#api-endpoints)
 - [Roles & Permissions](#roles--permissions)
+- [AI Features & Governance](#ai-features--governance)
 - [Database Migrations](#database-migrations)
 - [Environment Variables](#environment-variables)
 - [Getting Started](#getting-started)
@@ -26,6 +27,11 @@ VaultLedger provides organizations with a centralized platform to manage complia
 - **Approval workflows** — compliance reviews with pending/approved/rejected lifecycle
 - **Role-based access** — admin, approver and auditor roles with distinct permissions
 - **Composite foreign keys** — prevent cross-tenant data corruption at the database level
+- **AI-assisted drafting** — Claude drafts audit entries and review summaries; users always review and edit before saving
+- **Semantic search** — pgvector + OpenAI embeddings for meaning-based search across audit history
+- **PII detection** — AI-powered scan warns users before sensitive data is persisted
+- **Natural-language Q&A** — ask questions about tenant compliance data with cited audit sources
+- **Per-tenant AI quotas** — monthly token budgets enforced with usage tracked in `ai_interactions`
 
 ## Architecture
 
@@ -37,10 +43,11 @@ VaultLedger provides organizations with a centralized platform to manage complia
 │                Application Layer                    │
 │      Commands · Queries · Validators · DTOs         │
 │              (MediatR + FluentValidation)           │
-├─────────────────────────────────────────────────────┤
-│              Infrastructure Layer                   │
-│    EF Core · DbContext · JWT · Serilog · Services   │
-├─────────────────────────────────────────────────────┤
+├──────────────────────────┬──────────────────────────┤
+│   Infrastructure Layer   │       AI Layer           │
+│ EF Core · DbContext · JWT│  Claude · OpenAI · RAG   │
+│  Serilog · DbUp · Pgvec  │  Drafter · Summarizer    │
+├──────────────────────────┴──────────────────────────┤
 │                 Domain Layer                        │
 │       Entities · Enums · Interfaces · ValueObjects  │
 └─────────────────────────────────────────────────────┘
@@ -67,13 +74,16 @@ Request
 | Runtime | .NET 8 (LTS) |
 | Web framework | ASP.NET Core Web API |
 | ORM | Entity Framework Core + Npgsql |
-| Database | PostgreSQL 16 |
+| Database | PostgreSQL 16 + `pgvector` extension |
 | Migrations | DbUp (hand-written SQL scripts) |
-| Architecture | Clean Architecture (4 layers) |
+| Architecture | Clean Architecture (4 layers + AI layer) |
 | CQRS | MediatR |
 | Validation | FluentValidation |
 | Auth | JWT Bearer tokens + BCrypt |
 | Logging | Serilog (structured, with correlation IDs) |
+| AI generation | Anthropic SDK (Claude) with prompt caching |
+| AI embeddings | OpenAI SDK (`text-embedding-3-small`, 1536 dim) |
+| Vector store | `pgvector` with `ivfflat` cosine index |
 | Testing | xUnit + Testcontainers + WebApplicationFactory |
 | Frontend | Next.js 14 (App Router) + TypeScript + Tailwind CSS |
 | Containerization | Docker + Docker Compose |
@@ -82,7 +92,7 @@ Request
 
 ## Database Schema
 
-9 tables organized around multi-tenant compliance tracking.
+12 tables organized around multi-tenant compliance tracking and AI governance.
 
 ### Entity Relationship Overview
 
@@ -90,9 +100,11 @@ Request
 tenants ──┬── tenant_memberships ──── users (global, no tenant_id)
           ├── tenant_integrations
           ├── entities
-          ├── cases ──┬── audit_entries
+          ├── cases ──┬── audit_entries ──── audit_entry_embeddings
           │           └── compliance_reviews
-          └── integration_events
+          ├── integration_events
+          ├── ai_interactions          (meta-audit of every AI call)
+          └── ai_usage_quotas          (per-tenant monthly token budget)
 ```
 
 ### Table Definitions
@@ -224,6 +236,51 @@ External system data log for webhook payloads.
 | processing_status | string | NOT NULL — `pending`, `processed`, `failed` |
 | created_at | DateTime | NOT NULL, UTC |
 
+#### ai_interactions
+
+**Immutable meta-audit** — every AI call is logged for compliance and cost tracking. No update or delete.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| id | GUID | PK |
+| tenant_id | GUID | FK → tenants, NOT NULL |
+| user_id | GUID | FK → users, NOT NULL |
+| interaction_type | string | NOT NULL — `draft_audit_entry`, `summarize_review`, `embed`, `semantic_search`, `pii_scan`, `data_question` |
+| model_provider | string | NOT NULL — `anthropic`, `openai` |
+| model | string | NOT NULL — e.g. `claude-sonnet-4-6`, `text-embedding-3-small` |
+| prompt_tokens | int | NOT NULL |
+| completion_tokens | int | NOT NULL |
+| cost_usd | numeric(10,6) | NOT NULL |
+| created_at | DateTime | NOT NULL, UTC |
+
+#### ai_usage_quotas
+
+Per-tenant monthly AI budget. Upserted by the quota service; reset at the start of each billing period.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| id | GUID | PK |
+| tenant_id | GUID | FK → tenants, NOT NULL |
+| period_start | DateTime | NOT NULL — first day of billing month, UTC |
+| token_budget | bigint | NOT NULL |
+| tokens_used | bigint | NOT NULL, DEFAULT 0 |
+| cost_usd | numeric(10,6) | NOT NULL, DEFAULT 0 |
+| created_at | DateTime | NOT NULL, UTC |
+
+**Unique:** `(tenant_id, period_start)` — one quota record per tenant per month.
+
+#### audit_entry_embeddings
+
+Vector embeddings for semantic search. Separate table so embeddings can be regenerated (e.g. on model change) without touching the immutable `audit_entries` table.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| audit_entry_id | GUID | PK, composite FK `(tenant_id, audit_entry_id)` → audit_entries `(tenant_id, id)` |
+| tenant_id | GUID | FK → tenants, NOT NULL |
+| embedding | vector(1536) | NOT NULL — pgvector type |
+| model | string | NOT NULL — e.g. `text-embedding-3-small` |
+| created_at | DateTime | NOT NULL, UTC |
+
 ### Indexes
 
 ```sql
@@ -243,6 +300,18 @@ CREATE INDEX idx_reviews_status ON compliance_reviews(tenant_id, status, case_id
 -- Integration event processing (partial index)
 CREATE INDEX idx_events_pending ON integration_events(tenant_id, processing_status, created_at DESC)
   WHERE processing_status = 'pending';
+
+-- AI usage and cost analytics
+CREATE INDEX idx_ai_interactions_tenant_created ON ai_interactions(tenant_id, created_at DESC);
+CREATE INDEX idx_ai_interactions_type ON ai_interactions(tenant_id, interaction_type, created_at DESC);
+
+-- AI quota lookup (one record per tenant per month)
+CREATE UNIQUE INDEX idx_ai_quotas_tenant_period ON ai_usage_quotas(tenant_id, period_start);
+
+-- Semantic search (pgvector ivfflat with cosine distance)
+CREATE INDEX idx_audit_embeddings_vector ON audit_entry_embeddings
+  USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX idx_audit_embeddings_tenant ON audit_entry_embeddings(tenant_id);
 ```
 
 ## Tenant Isolation
@@ -279,7 +348,7 @@ This prevents a bug or query filter bypass from creating records that cross tena
 | Layer | Protects Against |
 |-------|-----------------|
 | Query filters | Accidental data leakage in normal operations |
-| Composite FKs | Data corruption from bugs, bypassed filters, or direct DB access |
+| Composite FKs | Data corruption from bugs, bypassed filters or direct DB access |
 
 ## API Endpoints
 
@@ -347,6 +416,19 @@ All endpoints require JWT authentication unless noted. Tenant context is extract
 
 *Webhook endpoint validates a shared secret from the integration's stored credentials.
 
+### AI
+
+All AI endpoints enforce the current tenant's monthly token budget. On budget exceeded, endpoints return `429 quota_exceeded`. Every successful call is logged to `ai_interactions`.
+
+| Method | Route | Roles | Description |
+|--------|-------|-------|-------------|
+| POST | `/api/ai/draft-audit-entry` | admin, auditor | Claude drafts a structured audit entry from free text — returns suggested fields, **never saves** |
+| POST | `/api/ai/summarize-review` | admin, approver, auditor | Claude generates a review summary from a case's audit entries |
+| POST | `/api/ai/scan-pii` | any | Detects PII patterns in audit entry text; returns warnings, not blocks |
+| POST | `/api/ai/search` | any | Semantic search over audit entries via pgvector + OpenAI embeddings |
+| POST | `/api/ai/ask` | any | Natural-language Q&A over tenant data with tool-use + citations (supports SSE streaming) |
+| GET | `/api/ai/usage` | admin | Current month token/cost usage for the tenant |
+
 ## Roles & Permissions
 
 | Permission | Admin | Approver | Auditor |
@@ -361,6 +443,58 @@ All endpoints require JWT authentication unless noted. Tenant context is extract
 | Manage tenant settings | Yes | No | No |
 | Invite members | Yes | No | No |
 | View integration events | Yes | No | No |
+| Draft audit entries with AI | Yes | No | Yes |
+| Summarize reviews with AI | Yes | Yes | Yes |
+| Semantic search + Q&A | Yes | Yes | Yes |
+| View AI usage & cost | Yes | No | No |
+
+## AI Features & Governance
+
+VaultLedger treats AI as a **first-class but strictly advisory** capability. Every AI interaction is bounded, logged and reviewable.
+
+### Design Principles
+
+| Principle | Implementation |
+|-----------|---------------|
+| **Advisory, never authoritative** | AI drafts are returned as DTOs, never persisted directly. The user must submit the normal `Create` endpoint to save. |
+| **Human-in-the-loop** | Every AI-suggested entry, summary or review is editable before save. Approvers never see AI output marked as "AI-approved". |
+| **Tenant boundary enforcement** | All AI prompts include only the current tenant's data. Tool-use calls from the NL Q&A assistant are wrapped in the same EF Core query filters. |
+| **Meta-audit logging** | Every AI call writes to `ai_interactions` with tenant, user, model, tokens and cost. This makes AI usage itself auditable. |
+| **Cost quotas enforced** | `IAiQuotaService.CheckAndReserve()` runs before each call. On budget exceeded: `429 quota_exceeded`. Tokens deducted after successful completion. |
+| **Citations required** | Natural-language Q&A answers must include `audit_entry_id` / `case_id` citations. Clients render these as links back to source records. |
+
+### AI Capabilities
+
+1. **Audit entry drafter** — user types free-text observation, Claude returns suggested `entry_type`, `severity` and polished `body`. User edits and saves.
+2. **Review summarizer** — Claude reads all audit entries in a case and drafts a review summary. User edits and submits.
+3. **PII scanner** — scans audit entry text for PII patterns (emails, phone numbers, SSNs, credit cards, dates of birth). Returns warnings; never blocks save.
+4. **Semantic search** — OpenAI `text-embedding-3-small` embeddings stored in pgvector. Query embeds the search text, `ORDER BY embedding <=> $1 LIMIT N` with cosine distance.
+5. **Data Q&A assistant** — Claude with tool-use (`search_audit_entries`, `list_cases`, `get_case_stats`) answers natural-language questions about a tenant's data. All tool outputs tenant-filtered. Supports SSE streaming.
+
+### Model Choice
+
+| Capability | Provider | Model | Rationale |
+|-----------|----------|-------|-----------|
+| Drafting, summarization, PII, Q&A | Anthropic | `claude-opus-4-7` / `claude-sonnet-4-6` | Best structured output and long-context reasoning; prompt caching reduces cost |
+| Embeddings | OpenAI | `text-embedding-3-small` (1536 dim) | 5× cheaper than alternatives; strong semantic quality for English compliance text |
+
+### Prompt Caching
+
+System prompts for drafter, summarizer and Q&A assistant are sent as [Anthropic cached content blocks](https://docs.anthropic.com/claude/docs/prompt-caching). A typical draft request hits the cache after the first call of the day, dropping cost to ~10% of an uncached call.
+
+### Cost Controls
+
+- Default monthly budget: `AI__MonthlyTokenBudgetDefault` (e.g., `5_000_000` tokens)
+- Per-call token estimation before execution; reserved via `IAiQuotaService`
+- Actual usage committed after Anthropic/OpenAI response
+- Admin dashboard: current month usage, cost breakdown by `interaction_type`, top users
+
+### What Happens on Model Drift
+
+If OpenAI updates the embedding model or Anthropic deprecates a Claude version:
+1. Old embeddings are tagged with their model in `audit_entry_embeddings.model`
+2. Re-embedding is a one-off backfill command: `dotnet run -- embed-backfill --model text-embedding-3-small`
+3. During transition, searches filter by `model = @current_model` to avoid mixing spaces
 
 ## Database Migrations
 
@@ -543,6 +677,12 @@ Immutability is enforced at four layers: domain (private setters), application (
 | `Jwt__Audience` | JWT audience claim | `VaultLedger` |
 | `Jwt__ExpiryMinutes` | Token expiry in minutes | `60` |
 | `ASPNETCORE_ENVIRONMENT` | Runtime environment | `Development` |
+| `Anthropic__ApiKey` | Claude API key (required for AI drafting, summaries, PII, Q&A) | — |
+| `Anthropic__Model` | Default Claude model | `claude-sonnet-4-6` |
+| `OpenAI__ApiKey` | OpenAI API key (required for embeddings) | — |
+| `OpenAI__EmbeddingModel` | Embedding model name | `text-embedding-3-small` |
+| `AI__MonthlyTokenBudgetDefault` | Default per-tenant monthly token budget | `5000000` |
+| `AI__EnableSemanticSearch` | Enable pgvector semantic search endpoint | `true` |
 
 ## Getting Started
 
@@ -551,6 +691,8 @@ Immutability is enforced at four layers: domain (private setters), application (
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 - [Docker](https://www.docker.com/products/docker-desktop) + Docker Compose
 - [Node.js 20+](https://nodejs.org/) (for frontend)
+- [Anthropic API key](https://console.anthropic.com/) (required for AI features)
+- [OpenAI API key](https://platform.openai.com/) (required for embeddings)
 
 ### Run with Docker Compose
 
@@ -597,7 +739,8 @@ dotnet test tests/VaultLedger.IntegrationTests
 src/
 ├── VaultLedger.Domain/             # Entities, enums, interfaces (zero dependencies)
 ├── VaultLedger.Application/        # Commands, queries, validators, DTOs (MediatR)
-├── VaultLedger.Infrastructure/     # EF Core, JWT, Serilog, external services
+├── VaultLedger.Infrastructure/     # EF Core, JWT, Serilog, DbUp, external services
+├── VaultLedger.AI/                 # Claude, OpenAI, drafters, summarizer, quota service
 ├── VaultLedger.API/                # Controllers, middleware, Program.cs
 └── vaultledger-ui/                 # Next.js frontend
 
