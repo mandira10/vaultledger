@@ -1,5 +1,7 @@
+using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using VaultLedger.Application.Common.Interfaces;
+using VaultLedger.Domain.Common;
 using VaultLedger.Domain.Entities;
 using VaultLedger.Domain.Interfaces;
 
@@ -43,5 +45,30 @@ public class AppDbContext : DbContext, IAppDbContext
 
         // Auto-discovers IEntityTypeConfiguration<T> classes in this assembly.
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(AppDbContext).Assembly);
+
+        ApplyTenantQueryFilters(modelBuilder);
+    }
+
+    // Adds a WHERE tenant_id = @currentTenant filter to every ITenantScoped entity.
+    // Callers can opt out per-query with .IgnoreQueryFilters() when explicitly needed.
+    private void ApplyTenantQueryFilters(ModelBuilder modelBuilder)
+    {
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            if (!typeof(ITenantScoped).IsAssignableFrom(entityType.ClrType))
+                continue;
+
+            var param = Expression.Parameter(entityType.ClrType, "e");
+            var tenantIdOnEntity = Expression.Property(
+                param,
+                nameof(ITenantScoped.TenantId));
+            var tenantIdOnContext = Expression.Property(
+                Expression.Constant(_tenantContext),
+                nameof(ITenantContext.TenantId));
+            var equal = Expression.Equal(tenantIdOnEntity, tenantIdOnContext);
+            var lambda = Expression.Lambda(equal, param);
+
+            modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
+        }
     }
 }
