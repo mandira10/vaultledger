@@ -23,6 +23,13 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Exe so `dotnet run` invokes MigrationRunner.Main. The DLL stays consumable as a library. -->
+    <OutputType>Exe</OutputType>
+    <StartupObject>VaultLedger.Infrastructure.Migrations.MigrationRunner</StartupObject>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Migrations\Scripts\**\*.sql" />
+  </ItemGroup>
 
 </Project>
